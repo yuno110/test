@@ -1,0 +1,53 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.1.1'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+description = 'Redis 학습용 놀이터'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	// Redis 본체. RedisTemplate / StringRedisTemplate + Lettuce 드라이버가 여기서 온다.
+	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+	// @Cacheable / @CacheEvict 추상화. 실제 저장소는 위의 Redis 가 맡는다.
+	implementation 'org.springframework.boot:spring-boot-starter-cache'
+	// JPA + Hibernate
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	// @Valid, @NotBlank, @Email
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	// HTTP로 찔러보면서 실습하기 위한 웹 계층
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	// /actuator/health 로 "Redis 붙었나?"를 눈으로 확인하는 용도
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	// 브라우저에서 /h2-console 로 테이블을 직접 들여다보기 위한 것
+	implementation 'org.springframework.boot:spring-boot-h2console'
+
+	compileOnly 'org.projectlombok:lombok'
+	annotationProcessor 'org.projectlombok:lombok'
+	developmentOnly 'org.springframework.boot:spring-boot-devtools'
+	runtimeOnly 'com.h2database:h2'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-data-redis-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-cache-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testCompileOnly 'org.projectlombok:lombok'
+	testAnnotationProcessor 'org.projectlombok:lombok'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
