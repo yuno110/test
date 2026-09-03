@@ -18,6 +18,7 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.serializer.GenericJacksonJsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext.SerializationPair;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
+import org.springframework.util.Assert;
 
 import com.example.test.cache.CacheNames;
 
@@ -70,12 +71,14 @@ public class CacheConfig {
 				.transactionAware()
 				// ③ 관통 대응 캐시: null 도 저장하되 TTL 을 아주 짧게 준다.
 				//    (없는 데이터를 계속 조회당해도 DB 까지 가지 않게 하되, 곧 생길 수도 있으니 10초만)
-				.withCacheConfiguration(CacheNames.PENETRATION_NULLABLE,
+				.withCacheConfiguration(
+						CacheNames.PENETRATION_NULLABLE,
 						RedisCacheConfiguration.defaultCacheConfig()
 								.entryTtl(Duration.ofSeconds(10))
 								.computePrefixWith(name -> CACHE_VERSION + "::" + name + "::")
 								.serializeKeysWith(defaults.getKeySerializationPair())
-								.serializeValuesWith(defaults.getValueSerializationPair()))
+								.serializeValuesWith(defaults.getValueSerializationPair())
+				)
 				// 스탬피드 실습은 짧은 TTL 이 편하다
 				.withCacheConfiguration(CacheNames.STAMPEDE_NAIVE, defaults.entryTtl(Duration.ofSeconds(30)))
 				.withCacheConfiguration(CacheNames.STAMPEDE_SYNC, defaults.entryTtl(Duration.ofSeconds(30)));
@@ -113,6 +116,11 @@ public class CacheConfig {
 	 * 만료 시각을 ±ratio 만큼 무작위로 흩뿌려서 몰림을 평탄화한다.
 	 */
 	private static TtlFunction jitter(Duration base, double ratio) {
+		// ratio 가 1 이상이면 delta 가 baseMillis 를 넘어 TTL 이 0 이하가 될 수 있다.
+		// 그러면 DefaultRedisCacheWriter.doPut 이 만료 없는 SET 을 실행해 "영구 캐시 키"가 생긴다.
+		// 조용히 새는 버그라서 기동 시점에 터뜨린다.
+		Assert.isTrue(ratio >= 0 && ratio < 1, "ratio 는 0 이상 1 미만이어야 한다: " + ratio);
+
 		return (key, value) -> {
 			long baseMillis = base.toMillis();
 			long spread = (long) (baseMillis * ratio);
