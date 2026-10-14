@@ -54,7 +54,7 @@ public class StampedeService {
 	 * (RedisCache.get(key, loader) -> DefaultRedisCacheWriter.get(...) 안에서
 	 *  isLockingCacheWriter() 가 false 면 그냥 GET 하고 없으면 로드한다)
 	 *
-	 * CacheConfig.lockingCacheManager 를 켜면(--cache.locking-writer=true) 1회로 줄어든다.
+	 * CacheConfig.cacheWriter 의 락을 켜면(--cache.locking-writer=true) 1회로 줄어든다.
 	 * 그 락은 Redis 에 저장되므로 인스턴스가 여러 대여도 유효하지만,
 	 * "캐시 이름 단위" 락이라 그 캐시 전체가 잠기고, 대기자는 폴링으로 기다려서 지연이 길다.
 	 */

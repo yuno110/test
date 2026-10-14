@@ -3,15 +3,12 @@ package com.example.test.config;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.cache.autoconfigure.RedisCacheManagerBuilderCustomizer;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
-import org.springframework.data.redis.cache.RedisCacheManager;
-import org.springframework.data.redis.cache.RedisCacheManager.RedisCacheManagerBuilder;
 import org.springframework.data.redis.cache.RedisCacheWriter;
 import org.springframework.data.redis.cache.RedisCacheWriter.TtlFunction;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -52,6 +49,7 @@ public class CacheConfig {
 		return RedisCacheConfiguration.defaultCacheConfig()
 				// ① + ② TTL 은 필수, 게다가 ±20% 흔들어서 동시 만료를 막는다
 				.entryTtl(jitter(DEFAULT_TTL, 0.2))
+				// 메서드가 null을 반환하면 캐시에 저장하지 않는다
 				.disableCachingNullValues()
 				// ⑤ 키 앞에 "v1::캐시이름::" 이 붙는다 → v1::members::1
 				.computePrefixWith(cacheName -> CACHE_VERSION + "::" + cacheName + "::")
@@ -65,49 +63,59 @@ public class CacheConfig {
 	 * 캐시별로 다른 정책을 주는 자리. 기본 설정(위 빈)을 받아 필요한 부분만 바꾼다.
 	 */
 	@Bean
-	public RedisCacheManagerBuilderCustomizer cacheCustomizer(RedisCacheConfiguration defaults) {
+	public RedisCacheManagerBuilderCustomizer cacheCustomizer(RedisCacheConfiguration defaults,
+			RedisConnectionFactory connectionFactory,
+			@Value("${cache.locking-writer:false}") boolean lockingWriter) {
 		return builder -> builder
+				// Boot 가 넣어준 기본 라이터를 아래 cacheWriter() 로 갈아끼운다
+				.cacheWriter(cacheWriter(connectionFactory, lockingWriter))
 				// ④ 캐시 연산을 트랜잭션 커밋 이후로 미룬다. 롤백되면 캐시는 건드려지지 않는다.
 				.transactionAware()
 				// ③ 관통 대응 캐시: null 도 저장하되 TTL 을 아주 짧게 준다.
-				//    (없는 데이터를 계속 조회당해도 DB 까지 가지 않게 하되, 곧 생길 수도 있으니 10초만)
+				// defaults에는 disableCachingNullValues()가 이미 걸려 있고, 그걸 되돌리는 메서드가 없다.
+				// RedisCacheConfiguration은 불변 객체라서 한 번 끈 걸 다시 켤 수 없고, null 허용이 기본값인 defaultCacheConfig()에서 새로 출발하는 수밖에 없다
 				.withCacheConfiguration(
 						CacheNames.PENETRATION_NULLABLE,
 						RedisCacheConfiguration.defaultCacheConfig()
-								.entryTtl(Duration.ofSeconds(10))
+								.entryTtl(Duration.ofSeconds(10)) // 없는 데이터를 계속 조회당해도 DB 까지 가지 않게 하되, 곧 생길 수도 있으니 10초만
 								.computePrefixWith(name -> CACHE_VERSION + "::" + name + "::")
 								.serializeKeysWith(defaults.getKeySerializationPair())
 								.serializeValuesWith(defaults.getValueSerializationPair())
 				)
 				// 스탬피드 실습은 짧은 TTL 이 편하다
+				// 위와 달리 default에서 출발한다. RedisCacheConfiguration이 불변이라 defaults.enrtyTtl은 default를 바꾸지 않고 TTL만 새 객체를 만들어 리턴한다
+				// 그래서 접두어,직렬화,null금지는 전부 그대로 물려받는다
 				.withCacheConfiguration(CacheNames.STAMPEDE_NAIVE, defaults.entryTtl(Duration.ofSeconds(30)))
 				.withCacheConfiguration(CacheNames.STAMPEDE_SYNC, defaults.entryTtl(Duration.ofSeconds(30)));
 	}
 
 	/**
-	 * ② (대안) Spring 이 제공하는 "락킹 캐시 라이터".
+	 * 캐시 라이터 = 캐시가 Redis 에 실제로 GET / SET / DEL 을 보내는 일꾼. 여기서 두 가지를 정한다.
 	 *
-	 * 중요: @Cacheable(sync = true) 는 이 라이터를 써야만 실제로 동작한다.
-	 * Boot 의 기본 캐시매니저는 non-locking 라이터라서 sync = true 를 붙여도 아무 효과가 없다.
-	 * (RedisCache.get(key, loader) 내부가 isLockingCacheWriter() 일 때만 락을 잡는다)
+	 * 1) immediateWrites() : 저장/삭제가 Redis 에 반영될 때까지 기다린다.
+	 *    Spring Data Redis 4.1 의 기본값은 비동기라서 evict() 가 DEL 이 끝나기도 전에 리턴한다.
+	 *    그러면 "지웠는데 바로 조회하니 아직 있다"가 생긴다.
+	 *    (④ 트랜잭션 데모의 "정상커밋후_캐시있음" 이 가끔 true 로 나오던 원인)
+	 *    비동기가 조금 더 빠르지만, 결과가 들쭉날쭉하면 실습이 안 되므로 즉시 반영으로 둔다.
 	 *
-	 * 기본값을 꺼둔 이유: 이 락은 "키 단위"가 아니라 "캐시 이름 단위"다.
-	 * 어떤 키 하나를 로딩하는 동안 그 캐시 전체가 잠긴다.
-	 * 그래서 보통은 RedisLock 처럼 키 단위 분산 락을 직접 쓰는 쪽이 낫다.
+	 * 2) enableLocking() : ② (대안) Spring 이 제공하는 락.
+	 *    @Cacheable(sync = true) 는 락킹 라이터여야만 실제로 동작한다.
+	 *    기본은 non-locking 라이터라서 sync = true 를 붙여도 아무 효과가 없다.
+	 *    (RedisCache.get(key, loader) 내부가 isLockingCacheWriter() 일 때만 락을 잡는다)
 	 *
-	 * 켜기: --cache.locking-writer=true
+	 *    기본값을 꺼둔 이유: 이 락은 "키 단위"가 아니라 "캐시 이름 단위"다.
+	 *    어떤 키 하나를 로딩하는 동안 그 캐시 전체가 잠긴다.
+	 *    그래서 보통은 RedisLock 처럼 키 단위 분산 락을 직접 쓰는 쪽이 낫다.
+	 *
+	 *    켜기: --cache.locking-writer=true
 	 */
-	@Bean
-	@ConditionalOnProperty(name = "cache.locking-writer", havingValue = "true")
-	public RedisCacheManager lockingCacheManager(RedisConnectionFactory connectionFactory,
-			RedisCacheConfiguration defaults,
-			ObjectProvider<RedisCacheManagerBuilderCustomizer> customizers) {
-
-		RedisCacheManagerBuilder builder = RedisCacheManager
-				.builder(RedisCacheWriter.lockingRedisCacheWriter(connectionFactory))
-				.cacheDefaults(defaults);
-		customizers.orderedStream().forEach(customizer -> customizer.customize(builder));
-		return builder.build();
+	private static RedisCacheWriter cacheWriter(RedisConnectionFactory connectionFactory, boolean locking) {
+		return RedisCacheWriter.create(connectionFactory, writer -> {
+			writer.immediateWrites();
+			if (locking) {
+				writer.enableLocking();
+			}
+		});
 	}
 
 	/**
