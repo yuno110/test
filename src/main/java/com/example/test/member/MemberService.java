@@ -32,7 +32,7 @@ public class MemberService {
 	/**
 	 * 캐시 실험용. 일부러 300ms 를 재워놨으므로 두 번째 호출부터 눈에 띄게 빨라진다.
 	 *
-	 * 동작: members::{id} 키를 Redis 에서 먼저 찾고, 있으면 메서드 본문을 아예 실행하지 않는다.
+	 * 동작: v1::members::{id} 키를 Redis 에서 먼저 찾고, 있으면 메서드 본문을 아예 실행하지 않는다.
 	 * 없으면 본문을 실행한 뒤 반환값을 그 키에 저장한다.
 	 */
 	@Cacheable(cacheNames = "members", key = "#id")
