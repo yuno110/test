@@ -14,8 +14,14 @@ import lombok.RequiredArgsConstructor;
 /**
  * ② 스탬피드 대응 - 분산 락.
  *
- * @Cacheable(sync = true) 는 "같은 JVM 안에서만" 한 스레드로 좁혀준다.
- * 서버를 4대 띄우면 4번 로드된다. 인스턴스가 여러 대인 실무에서는 Redis 자체를 락으로 쓴다.
+ * 자바의 synchronized / ReentrantLock 은 같은 서버(JVM) 안에서만 통한다. 서버를 4대 띄우면 4번 로드된다.
+ * 그래서 모든 서버가 같이 보는 Redis 에 락을 건다.
+ *
+ * @Cacheable(sync = true) 로는 안 되나?
+ *  - Redis 캐시는 sync 를 캐시 라이터에 그대로 맡긴다. 기본 라이터에는 락이 없어서
+ *    서버가 1대여도 아무 효과가 없다 (StampedeTest)
+ *  - 락킹 라이터를 켜면 동작하지만, 락이 캐시 이름 단위이고 만료가 없다 (StampedeWithLockingWriterTest)
+ *  - 이 클래스는 키 단위 + TTL 있는 락이다
  *
  * 핵심 두 가지:
  *  1) 획득은 SET key token NX PX ttl 한 방으로. (setIfAbsent 가 이 명령이다)
@@ -46,7 +52,7 @@ public class RedisLock {
 	 */
 	public String tryLock(String lockKey, Duration ttl) {
 		String token = UUID.randomUUID().toString();
-		boolean acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(lockKey, token, ttl));
+		boolean acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(lockKey, token, ttl)); // setIfAbsent는 키가 없을 때만 저장
 		return acquired ? token : null;
 	}
 

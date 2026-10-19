@@ -23,10 +23,13 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class StampedeService {
 
+	/** locked() 가 직접 저장하는 캐시의 TTL */
 	private static final Duration CACHE_TTL = Duration.ofSeconds(30);
+	/** locked() 의 락 TTL. 락을 잡은 쪽이 죽어도 이 시간이 지나면 저절로 풀린다 */
 	private static final Duration LOCK_TTL = Duration.ofSeconds(5);
 
 	private final StringRedisTemplate redis;
+	/** Redis 에 "지금 로딩 중" 표시를 거는 분산 락. 서버가 여러 대여도 다 같이 본다 (RedisLock 참고) */
 	private final RedisLock lock;
 
 	/** 느린 원본(DB 라고 치자)이 실제로 몇 번 불렸는지 */
@@ -66,40 +69,65 @@ public class StampedeService {
 	/**
 	 * (3) 분산 락 - 여러 인스턴스를 띄워도 전체에서 딱 한 번만 로드된다.
 	 * @Cacheable 을 쓰지 않고 캐시 조회/저장을 직접 한다(수동 Cache-Aside).
+	 *
+	 * 빵집으로 치면: 진열대(캐시)가 비었을 때, 주방 문에 "굽는 중" 팻말(락)을 먼저 건 1명만 굽고
+	 * 나머지는 진열대를 보며 기다린다.
+	 *
+	 *   ① 캐시 확인     ─ 있다 → 반환
+	 *   ② 락 시도       ─ 실패 → ③ awaitCache (캐시가 채워질 때까지 기다림)
+	 *   ④ 캐시 다시 확인 ─ 있다 → 반환
+	 *   ⑤ 로드 → ⑥ 캐시 저장 → ⑦ 락 해제 (finally)
+	 *
+	 * 키: stampedeLocked::{id} (캐시), lock::stampedeLocked::{id} (락)
+	 * @Cacheable 을 거치지 않으므로 CacheConfig 의 규칙(v1:: 접두어, 지터, JSON)은 적용되지 않는다.
 	 */
 	public String locked(String id) {
 		String cacheKey = "stampedeLocked::" + id;
 
+		// ① 캐시 확인. 평소에는 거의 다 여기서 끝난다 (GET stampedeLocked::{id})
 		String cached = redis.opsForValue().get(cacheKey);
 		if (cached != null) {
 			return cached;
 		}
 
+		// ② 락 시도. 동시에 와도 1명만 성공한다. 실패하면 기다리지 않고 바로 null
+		//    (SET lock::stampedeLocked::{id} <토큰> NX PX 5000)
 		String lockKey = "lock::" + cacheKey;
 		String token = lock.tryLock(lockKey, LOCK_TTL);
 
 		if (token == null) {
-			// 남이 로딩 중이다. 나까지 DB 를 칠 이유가 없으니 채워질 때까지 잠깐 기다린다.
+			// ③ 남이 로딩 중이다. 나까지 DB 를 칠 이유가 없으니 캐시가 채워질 때까지 기다린다.
 			return awaitCache(cacheKey, id);
 		}
 
 		try {
-			// 락을 잡는 사이에 앞사람이 이미 채웠을 수 있다 (double-checked)
+			// ④ 한 번 더 확인. ①과 ② 사이에 앞사람이 이미 채우고 락까지 풀었을 수 있다 (double-checked)
 			String again = redis.opsForValue().get(cacheKey);
 			if (again != null) {
 				return again;
 			}
+			// ⑤ 로드 (DB)
 			String value = slowLoad(id);
+			// ⑥ 캐시 저장 (SET stampedeLocked::{id} <값> EX 30)
 			redis.opsForValue().set(cacheKey, value, CACHE_TTL);
 			return value;
 		}
 		finally {
+			// ⑦ 락 해제. 로드하다 에러가 나도, ④에서 바로 반환해도 반드시 푼다.
+			//    내 토큰일 때만 지운다 (RedisLock.unlock)
 			lock.unlock(lockKey, token);
 		}
 	}
 
-	/** 락을 못 잡은 쪽이 캐시가 채워지길 기다린다. 끝내 안 채워지면 스스로 로드한다(무한 대기 금지). */
+	/**
+	 * ③ 락을 못 잡은 쪽이 캐시가 채워지길 기다린다.
+	 * 20ms 마다 GET 해서 값이 생기면 그걸 쓰고, 5초(LOCK_TTL)가 지나도 안 채워지면 직접 로드한다(무한 대기 금지).
+	 *
+	 * 약점: 락이 아니라 캐시만 본다. 락을 잡은 쪽이 5초 넘게 걸리거나 로드에 실패하면,
+	 * 기다리던 쪽이 전부 5초에 동시에 slowLoad 로 가서 스탬피드가 다시 생긴다.
+	 */
 	private String awaitCache(String cacheKey, String id) {
+		// 락이 5초면 저절로 풀리니, 그보다 오래 기다릴 이유가 없다
 		long deadline = System.currentTimeMillis() + LOCK_TTL.toMillis();
 		while (System.currentTimeMillis() < deadline) {
 			String value = redis.opsForValue().get(cacheKey);
@@ -107,9 +135,10 @@ public class StampedeService {
 				return value;
 			}
 			try {
-				Thread.sleep(20);
+				Thread.sleep(20);   // 쉬지 않고 GET 하면 Redis 를 괴롭힌다
 			}
 			catch (InterruptedException ex) {
+				// Thread.sleep 을 쓰면 꼭 붙여야 하는 형식. 누가 이 스레드를 멈추라고 하면 기다리기를 그만둔다
 				Thread.currentThread().interrupt();
 				break;
 			}

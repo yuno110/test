@@ -15,7 +15,8 @@ import lombok.RequiredArgsConstructor;
  * ③ Cache Penetration (캐시 관통) 실습.
  *
  * 상황: 존재하지 않는 id 를 계속 조회하면 캐시에는 영원히 아무것도 안 쌓인다.
- *      (예외를 던지거나 null 을 반환하면 @Cacheable 은 아무것도 저장하지 않는다)
+ *      (예외는 캐시에 저장되지 않는다. null 은 이 프로젝트 기본 설정이 "null 저장 금지"라서
+ *       저장되는 게 아니라 에러가 난다 → CacheBasicsTest)
  *      그래서 매 요청이 100% 미스 → DB 직행. 무작위 id 로 때리는 공격 벡터가 되기도 한다.
  *
  * 대응: null 자체를 "없음"이라는 값으로 짧게 캐싱한다.
